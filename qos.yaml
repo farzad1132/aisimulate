@@ -1,0 +1,11 @@
+seed: 42
+classes:
+  - name: qos-1
+    probability: 0.3
+    slo: {ttft_ms: 100, itl_ms: 50}
+  - name: qos-2
+    probability: 0.3
+    slo: {ttlt_ms: 1000}
+  - name: qos-3
+    probability: 0.4
+    slo: {ttlt_ms: 2000}

@@ -706,6 +706,8 @@ pub fn rebuild_replay_report_literals(
             ttst_ms: record.ttst_ms,
             e2e_latency_ms: record.e2e_latency_ms,
             itl_ms: record.itl_ms,
+            itl_p50_ms: record.itl_p50_ms,
+            itl_p99_ms: record.itl_p99_ms,
             input_length: record.input_length,
             requested_output_length: record.requested_output_length,
             output_length: record.output_length,

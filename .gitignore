@@ -23,3 +23,5 @@ htmlcov/
 
 # Rust build output
 target/
+
+experiments/

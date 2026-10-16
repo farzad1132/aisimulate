@@ -629,6 +629,10 @@ struct TraceRequestStats {
     metadata: Value,
     agentic: Option<AgenticRuntimeIdentity>,
     detail: Option<Box<PerRequestDetail>>,
+    /// P50 and P99 of this request's token gaps. Filled only when per-request
+    /// capture asks for them, so the default report path does not allocate.
+    itl_p50_ms: Option<f64>,
+    itl_p99_ms: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -853,8 +857,17 @@ pub struct PerRequestRecord {
     pub ttst_ms: Option<f64>,
     pub e2e_latency_ms: Option<f64>,
     /// Inter-token latency for this request, in milliseconds. Matches
-    /// AIPerf's `inter_token_latency` field — one scalar per request.
+    /// AIPerf's `inter_token_latency` field — one scalar per request, the
+    /// mean gap.
     pub itl_ms: Option<f64>,
+    /// P50 of this request's inter-token gaps. Absent when fewer than two
+    /// tokens were emitted, and only populated for per-request capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub itl_p50_ms: Option<f64>,
+    /// P99 of this request's inter-token gaps. Absent when fewer than two
+    /// tokens were emitted, and only populated for per-request capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub itl_p99_ms: Option<f64>,
     pub input_length: usize,
     /// Number of output tokens requested by the workload trace.
     pub requested_output_length: usize,
@@ -1084,6 +1097,7 @@ impl TraceRequestStats {
     fn finalize_token_timeline(
         &mut self,
         include_in_distributions: bool,
+        record_itl_percentiles: bool,
         itl_distribution: &mut StreamingDistribution,
         output_token_throughput_per_user: &mut StreamingDistribution,
     ) {
@@ -1091,14 +1105,27 @@ impl TraceRequestStats {
             return;
         };
 
-        if include_in_distributions {
+        // Gap storage is capture-only. The default path keeps the existing
+        // streaming sketch and does not retain a per-request vector.
+        let mut gaps = record_itl_percentiles
+            .then(|| Vec::with_capacity(times.len().saturating_sub(1)));
+        if include_in_distributions || gaps.is_some() {
             for window in times.windows(2) {
                 let itl_ms = (window[1] - window[0]).max(0.0);
-                itl_distribution.add(itl_ms);
-                if itl_ms > 0.0 {
-                    output_token_throughput_per_user.add(1000.0 / itl_ms);
+                if include_in_distributions {
+                    itl_distribution.add(itl_ms);
+                    if itl_ms > 0.0 {
+                        output_token_throughput_per_user.add(1000.0 / itl_ms);
+                    }
+                }
+                if let Some(gaps) = gaps.as_mut() {
+                    gaps.push(itl_ms);
                 }
             }
+        }
+        if let Some(mut gaps) = gaps.filter(|gaps| !gaps.is_empty()) {
+            self.itl_p50_ms = Some(percentile_in_place(&mut gaps, 50.0));
+            self.itl_p99_ms = Some(percentile_in_place(&mut gaps, 99.0));
         }
 
         let Some(first_ms) = times.first().copied() else {
@@ -1171,6 +1198,7 @@ impl TraceCollector {
             stats.finalize_token_timeline(
                 stats.terminal_status == Some(ReplayTerminalStatus::Completed)
                     && stats.first_admit_ms.is_some(),
+                false,
                 &mut self.itl_distribution,
                 &mut self.output_token_throughput_per_user,
             );
@@ -1278,6 +1306,8 @@ impl TraceCollector {
                 detail: self
                     .capture_per_request
                     .then(|| Box::new(PerRequestDetail::default())),
+                itl_p50_ms: None,
+                itl_p99_ms: None,
             },
         );
     }
@@ -1652,6 +1682,7 @@ impl TraceCollector {
             defer_token_timeline_finalization,
             bounded_summary,
             completed_to_retire,
+            capture_per_request,
             ..
         } = self;
         if let Some(stats) = requests.get_mut(&uuid)
@@ -1665,6 +1696,7 @@ impl TraceCollector {
             if !*defer_token_timeline_finalization {
                 stats.finalize_token_timeline(
                     status == ReplayTerminalStatus::Completed && stats.first_admit_ms.is_some(),
+                    *capture_per_request,
                     itl_distribution,
                     output_token_throughput_per_user,
                 );
@@ -1764,6 +1796,7 @@ impl TraceCollector {
             stats.finalize_token_timeline(
                 stats.terminal_status == Some(ReplayTerminalStatus::Completed)
                     && stats.first_admit_ms.is_some(),
+                self.capture_per_request,
                 &mut self.itl_distribution,
                 &mut self.output_token_throughput_per_user,
             );
@@ -2051,6 +2084,8 @@ impl TraceCollector {
                 ttst_ms: stats.ttst_ms(),
                 e2e_latency_ms: last_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
                 itl_ms: stats.mean_tpot_ms(),
+                itl_p50_ms: stats.itl_p50_ms,
+                itl_p99_ms: stats.itl_p99_ms,
                 input_length: stats.input_length,
                 requested_output_length: stats.requested_output_length,
                 output_length: stats.actual_output_length(),
@@ -3381,6 +3416,41 @@ mod tests {
         assert_eq!(parsed["decode_worker_idx"], 1);
         assert!(parsed["itl_ms"].is_number());
         assert_eq!(parsed["terminal_status"], "completed");
+    }
+
+    #[test]
+    fn per_request_itl_percentiles_rank_token_gaps() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        let uuid = Uuid::from_u128(7);
+        collector.on_arrival(uuid, 0.0, 8, 4);
+        collector.on_admit(uuid, 0.0, 0);
+        for time in [10.0, 20.0, 30.0, 100.0] {
+            collector.on_token(uuid, time);
+        }
+        collector.on_terminal(uuid, 100.0, ReplayTerminalStatus::Completed);
+
+        let single = Uuid::from_u128(8);
+        collector.on_arrival(single, 0.0, 8, 1);
+        collector.on_admit(single, 0.0, 0);
+        collector.on_token(single, 10.0);
+        collector.on_terminal(single, 10.0, ReplayTerminalStatus::Completed);
+
+        let report = collector.finish();
+        let multi = report
+            .per_request
+            .iter()
+            .find(|record| record.uuid == uuid.to_string())
+            .expect("multi-token request is captured");
+        assert_eq!(multi.itl_p50_ms, Some(10.0));
+        assert_eq!(multi.itl_p99_ms, Some(70.0));
+        let one = report
+            .per_request
+            .iter()
+            .find(|record| record.uuid == single.to_string())
+            .expect("single-token request is captured");
+        assert_eq!(one.itl_p50_ms, None);
+        assert_eq!(one.itl_p99_ms, None);
     }
 
     #[test]

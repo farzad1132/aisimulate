@@ -1,0 +1,16 @@
+engine:
+  mode: aggregated
+  model: meta-llama/Meta-Llama-3.1-8B
+  hardware: h100_sxm
+  backend: vllm
+  workers:
+    aggregated:
+      parallelism:
+        replicas: 1
+      scheduler:
+        max_batched_tokens: 1500
+
+traffic:
+  source: {type: synthetic, input_tokens: 2048, output_tokens: 128}
+  load: {type: poisson, requests_per_second: 10}
+  stop: {requests: 500}

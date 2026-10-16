@@ -229,6 +229,8 @@ fn validate_per_request_finite(record: &PerRequestRecord) -> Result<()> {
         ("ttst_ms", record.ttst_ms),
         ("e2e_latency_ms", record.e2e_latency_ms),
         ("itl_ms", record.itl_ms),
+        ("itl_p50_ms", record.itl_p50_ms),
+        ("itl_p99_ms", record.itl_p99_ms),
         ("prefill_admit_ms", record.prefill_admit_ms),
         ("source_held_ms", record.source_held_ms),
         ("destination_reserved_ms", record.destination_reserved_ms),
