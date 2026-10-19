@@ -8,7 +8,7 @@ use crate::engine::HandoffId;
 use crate::engine::belady::BeladyOracle;
 use crate::engine::common::hashing::{compute_block_hash_for_seq, compute_seq_hash_for_block};
 use crate::engine::common::protocols::{
-    DirectRequest, EngineType, MockEngineArgs, OutputSignal, PreemptionMode,
+    DirectRequest, EngineType, MockEngineArgs, OutputSignal, PreemptionMode, QueuePolicy,
 };
 use crate::engine::scheduler::{
     KvEventVisibility, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
@@ -1501,6 +1501,7 @@ mod core_behavior {
             output_token_ids: Some(planned.clone()),
             uuid: Some(uuid),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -1549,6 +1550,7 @@ mod core_behavior {
             output_token_ids: None,
             uuid: Some(r1),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
@@ -1556,6 +1558,7 @@ mod core_behavior {
             output_token_ids: None,
             uuid: Some(r2),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -1612,6 +1615,7 @@ mod core_behavior {
             output_token_ids: None,
             uuid: Some(r1),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
@@ -1619,6 +1623,7 @@ mod core_behavior {
             output_token_ids: None,
             uuid: Some(r2),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -1655,6 +1660,7 @@ mod core_behavior {
                 output_token_ids: None,
                 uuid: Some(uuid),
                 arrival_timestamp_ms: None,
+                priority: 0,
             });
         }
 
@@ -1714,6 +1720,7 @@ mod core_behavior {
             output_token_ids: None,
             uuid: Some(Uuid::from_u128(81)),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -1737,6 +1744,7 @@ mod core_behavior {
             output_token_ids: None,
             uuid: Some(uuid),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -1779,6 +1787,7 @@ mod core_behavior {
                 output_token_ids: None,
                 uuid: Some(uuid),
                 arrival_timestamp_ms: None,
+                priority: 0,
             });
         }
 
@@ -1799,6 +1808,54 @@ mod core_behavior {
         assert_eq!(request.num_preemptions, 1);
         assert_eq!(core.state.waiting.front().copied(), Some(r2));
         assert_eq!(preemptions_before, 1);
+    }
+
+    #[test]
+    fn test_priority_preemption_evicts_largest_priority_running_request() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .preemption_mode(PreemptionMode::Lifo)
+            .queue_policy(QueuePolicy::Priority)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let worse = Uuid::from_u128(1);
+        let better = Uuid::from_u128(2);
+        let mut collector = crate::engine::trace::TraceCollector::default();
+        core.receive(DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 8,
+            uuid: Some(worse),
+            priority: 9,
+            ..DirectRequest::default()
+        });
+        let pass = core.execute_pass(&mut collector, 0.0);
+        let mut now_ms = pass.end_ms.max(1.0);
+        // LIFO would evict `better`, the most recently admitted request.
+        core.receive(DirectRequest {
+            tokens: (100..108).collect(),
+            max_output_tokens: 8,
+            uuid: Some(better),
+            priority: 1,
+            ..DirectRequest::default()
+        });
+        for _ in 0..16 {
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms.max(now_ms + 1.0);
+            if pass.mocker_metrics.vllm_preemptions_total > 0 {
+                break;
+            }
+        }
+        assert_eq!(core.state.requests[&worse].status, RequestStatus::Preempted);
+        assert_eq!(core.state.requests[&worse].num_preemptions, 1);
+        assert_eq!(core.state.requests[&better].num_preemptions, 0);
+        assert!(core.state.waiting.is_empty());
     }
 
     #[test]
@@ -1824,6 +1881,7 @@ mod core_behavior {
             output_token_ids: None,
             uuid: Some(holder),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
         core.receive(DirectRequest {
             tokens: (100..112).collect(),
@@ -1831,6 +1889,7 @@ mod core_behavior {
             output_token_ids: None,
             uuid: Some(blocked),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
         core.receive(DirectRequest {
             tokens: (200..204).collect(),
@@ -1838,6 +1897,7 @@ mod core_behavior {
             output_token_ids: None,
             uuid: Some(follower),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -1908,6 +1968,7 @@ mod core_behavior {
                 output_token_ids: None,
                 uuid: Some(uuid),
                 arrival_timestamp_ms: None,
+                priority: 0,
             });
         }
 
@@ -1937,6 +1998,7 @@ mod core_behavior {
                 output_token_ids: None,
                 uuid: Some(uuid),
                 arrival_timestamp_ms: None,
+                priority: 0,
             });
         }
 
@@ -1972,6 +2034,7 @@ mod core_behavior {
             output_token_ids: None,
             uuid: Some(short),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
         core.receive(DirectRequest {
             tokens: (100..104).collect(),
@@ -1979,6 +2042,7 @@ mod core_behavior {
             output_token_ids: None,
             uuid: Some(long),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -2070,6 +2134,7 @@ mod core_behavior {
                 output_token_ids: None,
                 uuid: Some(Uuid::from_u128(1)),
                 arrival_timestamp_ms: None,
+                priority: 0,
             });
             core.execute_pass(&mut collector, 0.0);
             assert!(core.is_empty());
@@ -2080,6 +2145,7 @@ mod core_behavior {
                 output_token_ids: None,
                 uuid: Some(Uuid::from_u128(2)),
                 arrival_timestamp_ms: None,
+                priority: 0,
             });
             let pass = core.execute_pass(&mut collector, 1.0);
             let fpm = pass.fpm.expect("forward-pass metrics should be present");
@@ -2121,6 +2187,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -2148,6 +2215,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(r1),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -2166,6 +2234,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(r2),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         // Pass 2: r1 decode + r2 prefill (mixed batch)
@@ -2195,6 +2264,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(r1),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -2234,6 +2304,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(r1),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -2278,6 +2349,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(r1),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
@@ -2285,6 +2357,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(r2),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -2322,6 +2395,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
         core.receive(DirectRequest {
             tokens: (100..112).collect(), // prompt_len = 12
@@ -2329,6 +2403,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -2367,6 +2442,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         let mut collector = crate::engine::trace::TraceCollector::default();
@@ -2436,6 +2512,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         // Prefill r1 and decode a few tokens to build up KV
@@ -2450,6 +2527,7 @@ mod forward_pass_metrics {
             output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             arrival_timestamp_ms: None,
+            priority: 0,
         });
 
         // This pass should trigger preemption

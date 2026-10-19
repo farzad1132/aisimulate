@@ -6,7 +6,7 @@ engine:
   workers:
     aggregated:
       parallelism:
-        replicas: 1
+        replicas: 2
       scheduler:
         max_batched_tokens: 1500
 

@@ -22,6 +22,14 @@ pub struct Request {
     /// output position, so reusing a request ID reproduces the same stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_token_ids: Option<Vec<u32>>,
+    /// Waiting-queue key under `queue_policy: priority`; lower is served first.
+    /// Ignored by the default FCFS policy.
+    #[serde(default, skip_serializing_if = "is_zero_priority")]
+    pub priority: i32,
+}
+
+fn is_zero_priority(value: &i32) -> bool {
+    *value == 0
 }
 
 /// Commands supported by the standalone scheduler.

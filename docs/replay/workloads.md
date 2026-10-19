@@ -430,7 +430,7 @@ Both formats use the same row schema. Rows with the same `session_id` are turns 
 | `hash_ids` | Yes | Prompt hash blocks at `traffic.source.block_size`. |
 | `timestamp` or `created_time` | Conditional | Virtual timestamp in milliseconds. Required for the first row of every session under `trace_timestamps`. |
 | `delay` or `delay_ms` | No | Inter-turn delay in milliseconds. It must be omitted or zero on a session's first row; later rows use it instead of a timestamp difference. |
-| `priority`, `strict_priority`, `policy_class` | No | Scheduling metadata. |
+| `priority`, `strict_priority`, `policy_class` | No | Scheduling metadata. `priority` is a 32-bit integer (default `0`) that orders the vLLM waiting queue under [`queue_policy: priority`](engine/workers.md#vllm-queue-policy), lowest first. The default FCFS queue ignores it. |
 
 With `format: mooncake`, every row describes that turn's complete prompt. With
 `format: mooncake-delta`, the first row describes the initial prompt, while each later row's input and

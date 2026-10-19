@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::engine::KvEvent;
 use crate::engine::common::hashing::Token;
 use crate::engine::common::perf_model::PerfModel;
+pub(crate) use crate::engine::config::QueuePolicy;
 use crate::engine::config::{NativeHostOffloadConfig, StateCacheConfig};
 
 /// Sink for neutral KV-cache events emitted by a rank.
@@ -78,6 +79,8 @@ pub(crate) struct DirectRequest {
     pub output_token_ids: Option<Vec<Token>>,
     pub uuid: Option<Uuid>,
     pub arrival_timestamp_ms: Option<f64>,
+    #[serde(default)]
+    pub priority: i32,
 }
 
 impl DirectRequest {
@@ -225,6 +228,8 @@ pub(crate) struct MockEngineArgs {
     pub kv_transfer_timing_mode: KvTransferTimingMode,
     #[builder(default = "PreemptionMode::Lifo")]
     pub preemption_mode: PreemptionMode,
+    #[builder(default = "QueuePolicy::Fcfs")]
+    pub queue_policy: QueuePolicy,
     #[builder(default = "None")]
     pub sglang: Option<SglangArgs>,
     #[builder(default = "false")]

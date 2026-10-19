@@ -1,0 +1,20 @@
+engine:
+  mode: disaggregated
+  model: meta-llama/Meta-Llama-3.1-8B
+  hardware: h100_sxm
+  backend: vllm
+  workers:
+    prefill:
+      parallelism:
+        replicas: 1
+      scheduler:
+        max_batched_tokens: 8000
+    decode:
+      parallelism:
+        replicas: 1
+
+# Used only when predicting this file directly; trace-rps replaces it.
+traffic:
+  source: {type: synthetic, input_tokens: 2048, output_tokens: 128}
+  load: {type: poisson, requests_per_second: 10}
+  stop: {requests: 500}

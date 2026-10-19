@@ -452,6 +452,7 @@ fn core_args(config: &EngineConfig, timing: Arc<dyn TimingModel>) -> MockEngineA
             PreemptionMode::Lifo => CorePreemptionMode::Lifo,
             PreemptionMode::Fifo => CorePreemptionMode::Fifo,
         },
+        queue_policy: config.queue_policy,
         sglang: Some(SglangArgs {
             schedule_policy: Some(
                 match config.sglang.schedule_policy {
@@ -509,6 +510,7 @@ fn core_request(request: Request) -> DirectRequest {
         output_token_ids: request.output_token_ids,
         uuid: Some(request.request_id),
         arrival_timestamp_ms: None,
+        priority: request.priority,
     }
 }
 
@@ -766,6 +768,7 @@ mod tests {
                     tokens: vec![1, 2, 3, 4],
                     max_output_tokens: 20,
                     output_token_ids: None,
+                    priority: 0,
                 }),
                 CommandContext {
                     now_ms: 0.0,
@@ -786,6 +789,7 @@ mod tests {
                     tokens: (10..22).collect(),
                     max_output_tokens: 1,
                     output_token_ids: None,
+                    priority: 0,
                 }),
                 CommandContext {
                     now_ms: first_end_ms,
@@ -925,6 +929,7 @@ mod tests {
                     tokens,
                     max_output_tokens: 0,
                     output_token_ids: None,
+                    priority: 0,
                 }),
                 CommandContext {
                     now_ms,
@@ -969,6 +974,7 @@ mod tests {
                         tokens: vec![1, 2, 3, 4],
                         max_output_tokens: 0,
                         output_token_ids: None,
+                        priority: 0,
                     },
                 },
                 CommandContext {
@@ -997,6 +1003,7 @@ mod tests {
                     tokens: vec![1, 2, 3, 4],
                     max_output_tokens: output_token_ids.len(),
                     output_token_ids: Some(output_token_ids),
+                    priority: 0,
                 }),
                 CommandContext {
                     now_ms: 0.0,
@@ -1114,6 +1121,7 @@ mod tests {
                     tokens: vec![21, 22, 23, 24],
                     max_output_tokens: 0,
                     output_token_ids: None,
+                    priority: 0,
                 }),
                 CommandContext {
                     now_ms: h2d_due_ms - 0.5,
@@ -1135,6 +1143,7 @@ mod tests {
                     tokens: vec![31, 32, 33, 34],
                     max_output_tokens: 0,
                     output_token_ids: None,
+                    priority: 0,
                 }),
                 CommandContext {
                     now_ms: h2d_due_ms + 0.5,
@@ -1192,6 +1201,7 @@ mod tests {
                     tokens: vec![41, 42, 43, 44],
                     max_output_tokens: 0,
                     output_token_ids: None,
+                    priority: 0,
                 }),
                 CommandContext {
                     now_ms: h2d_due_ms + 1.0,
@@ -1248,6 +1258,7 @@ mod tests {
                         tokens: tokens.clone(),
                         max_output_tokens: 0,
                         output_token_ids: None,
+                        priority: 0,
                     }),
                     CommandContext {
                         now_ms,
@@ -1285,6 +1296,7 @@ mod tests {
                     tokens: vec![21, 22, 23, 24],
                     max_output_tokens: 0,
                     output_token_ids: None,
+                    priority: 0,
                 }),
                 CommandContext {
                     now_ms: h2d_due_ms - 0.5,
@@ -1376,6 +1388,7 @@ mod tests {
                         tokens: vec![1, 2, 3, 4],
                         max_output_tokens: 1,
                         output_token_ids: Some(vec![5]),
+                        priority: 0,
                     },
                 },
                 CommandContext {
@@ -1444,6 +1457,7 @@ mod tests {
                         tokens,
                         max_output_tokens: 8,
                         output_token_ids: None,
+                        priority: 0,
                     }),
                     CommandContext {
                         now_ms: 0.0,
@@ -1499,6 +1513,7 @@ mod tests {
                         tokens: vec![1, 2, 3, 4],
                         max_output_tokens: 1,
                         output_token_ids: Some(vec![5]),
+                        priority: 0,
                     },
                 },
                 CommandContext {
@@ -1591,6 +1606,7 @@ mod tests {
                         tokens: (1..=9).collect(),
                         max_output_tokens: 2,
                         output_token_ids: None,
+                        priority: 0,
                     },
                 },
                 0.0,
@@ -1639,6 +1655,7 @@ mod tests {
                         tokens: (1..=9).collect(),
                         max_output_tokens: 1,
                         output_token_ids: None,
+                        priority: 0,
                     },
                 },
                 now_ms,

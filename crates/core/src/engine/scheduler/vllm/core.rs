@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -11,7 +11,7 @@ use crate::engine::HostOffloadObserver;
 use crate::engine::belady::BeladyOracle;
 use crate::engine::common::protocols::{
     DirectRequest, EngineType, KvEventPublishers, MockEngineArgs, OutputSignal, PreemptionMode,
-    PrefillCost, WorkerType,
+    PrefillCost, QueuePolicy, WorkerType,
 };
 use crate::engine::common::speculative::{
     SpeculativeDecodeSampler, normalize_conditional_accept_rates,
@@ -61,6 +61,8 @@ pub(crate) struct VllmRequestState {
     /// `pending_destinations`, outside the physical waiting queues, so
     /// activation restores this ordinal. It is not activation priority.
     waiting_order: u64,
+    /// Waiting-queue key under `QueuePolicy::Priority`; lower is served first.
+    priority: i32,
     is_decode_handoff: bool,
     pub(crate) num_computed_tokens: usize,
     pub(crate) num_preemptions: usize,
@@ -128,6 +130,9 @@ impl VllmRequestState {
 #[derive(Default)]
 pub(crate) struct SchedulerState {
     pub(crate) waiting: VecDeque<Uuid>,
+    /// Ordinary waiting queue under `QueuePolicy::Priority`, keyed by
+    /// `(priority, waiting_order)`. When set, `waiting` stays empty.
+    priority_waiting: Option<BTreeMap<(i32, u64), Uuid>>,
     waiting_members: FxHashSet<Uuid>,
     /// vLLM's `skipped_waiting`: requests deferred by the connector (including
     /// in-flight load placeholders) are retried ahead of the ordinary FCFS
@@ -233,13 +238,51 @@ impl SchedulerState {
             .unwrap_or_default()
     }
 
+    fn new(queue_policy: QueuePolicy) -> Self {
+        Self {
+            priority_waiting: (queue_policy == QueuePolicy::Priority).then(BTreeMap::new),
+            ..Self::default()
+        }
+    }
+
+    fn priority_key(&self, uuid: Uuid) -> (i32, u64) {
+        let request = self
+            .requests
+            .get(&uuid)
+            .expect("priority-queued request missing from state");
+        (request.priority, request.waiting_order)
+    }
+
+    /// Insert into the priority index when that policy is active.
+    fn insert_priority_waiting(&mut self, uuid: Uuid) -> bool {
+        if self.priority_waiting.is_none() {
+            return false;
+        }
+        let key = self.priority_key(uuid);
+        let index = self.priority_waiting.as_mut().expect("checked above");
+        assert!(index.insert(key, uuid).is_none());
+        true
+    }
+
+    fn remove_priority_waiting(&mut self, uuid: Uuid) {
+        if self.priority_waiting.is_none() {
+            return;
+        }
+        let key = self.priority_key(uuid);
+        let index = self.priority_waiting.as_mut().expect("checked above");
+        debug_assert_eq!(index.get(&key), Some(&uuid));
+        index.remove(&key);
+    }
+
     fn push_waiting(&mut self, uuid: Uuid) {
         debug_assert!(!self.connector_waiting_members.contains(&uuid));
         if !self.waiting_members.insert(uuid) {
             return;
         }
         self.record_queued_length(uuid);
-        self.waiting.push_back(uuid);
+        if !self.insert_priority_waiting(uuid) {
+            self.waiting.push_back(uuid);
+        }
         if self
             .requests
             .get(&uuid)
@@ -287,9 +330,11 @@ impl SchedulerState {
             return;
         }
         self.record_queued_length(uuid);
-        let waiting_index =
-            self.insertion_index_for_waiting_order(&self.waiting, waiting_order, false);
-        self.waiting.insert(waiting_index, uuid);
+        if !self.insert_priority_waiting(uuid) {
+            let waiting_index =
+                self.insertion_index_for_waiting_order(&self.waiting, waiting_order, false);
+            self.waiting.insert(waiting_index, uuid);
+        }
         if self
             .requests
             .get(&uuid)
@@ -310,7 +355,9 @@ impl SchedulerState {
             return;
         }
         self.record_queued_length(uuid);
-        self.waiting.push_front(uuid);
+        if !self.insert_priority_waiting(uuid) {
+            self.waiting.push_front(uuid);
+        }
         if self
             .requests
             .get(&uuid)
@@ -330,7 +377,9 @@ impl SchedulerState {
         let connector = self.connector_waiting_members.remove(&uuid);
         self.connector_deadline_waiting_members.remove(&uuid);
         debug_assert!(!(ordinary && connector));
-        if ordinary && self.waiting.front() == Some(&uuid) {
+        if ordinary && self.priority_waiting.is_some() {
+            self.remove_priority_waiting(uuid);
+        } else if ordinary && self.waiting.front() == Some(&uuid) {
             self.waiting.pop_front();
         }
         if connector && self.connector_waiting.front() == Some(&uuid) {
@@ -461,6 +510,9 @@ impl SchedulerState {
             }
         }
 
+        if let Some(index) = &self.priority_waiting {
+            return index.values().next().copied();
+        }
         self.compact_waiting_front();
         self.waiting.front().copied()
     }
@@ -507,7 +559,9 @@ impl SchedulerState {
 
     pub(crate) fn take_completed(&mut self, uuid: &Uuid) -> Option<VllmRequestState> {
         self.forget_queued_length(*uuid);
-        self.waiting_members.remove(uuid);
+        if self.waiting_members.remove(uuid) {
+            self.remove_priority_waiting(*uuid);
+        }
         self.connector_waiting_members.remove(uuid);
         self.connector_deadline_waiting_members.remove(uuid);
         self.running_members.remove(uuid);
@@ -607,10 +661,19 @@ impl SchedulerState {
                 );
                 request.debug_assert_invariants(*uuid);
             }
-            debug_assert!(
-                self.waiting.len() >= self.waiting_members.len(),
-                "waiting queue dropped live membership entries"
-            );
+            if let Some(index) = &self.priority_waiting {
+                debug_assert!(self.waiting.is_empty());
+                debug_assert_eq!(
+                    index.len(),
+                    self.waiting_members.len(),
+                    "priority waiting index diverged from live membership"
+                );
+            } else {
+                debug_assert!(
+                    self.waiting.len() >= self.waiting_members.len(),
+                    "waiting queue dropped live membership entries"
+                );
+            }
             debug_assert!(
                 self.connector_waiting.len() >= self.connector_waiting_members.len(),
                 "connector waiting queue dropped live membership entries"
@@ -857,12 +920,13 @@ impl VllmCore {
                     .expect("validated grouped cache capacity"),
             ));
         }
+        let state = SchedulerState::new(args.queue_policy);
         Ok(Self {
             kv_manager,
             belady_oracle: None,
             args,
             dp_rank,
-            state: SchedulerState::default(),
+            state,
             speculative_sampler,
             kv_event_buffer,
             source_holds: SourceHolds::default(),
@@ -1347,6 +1411,7 @@ impl VllmCore {
         waiting_order: u64,
     ) -> VllmRequestState {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
+        let priority = request.priority;
         let prompt_len = request.tokens.len();
         let requested_max_output_tokens = request.max_output_tokens;
         let mut max_output_tokens = request.effective_max_output_tokens();
@@ -1409,6 +1474,7 @@ impl VllmCore {
             sequence,
             status,
             waiting_order,
+            priority,
             is_decode_handoff: false,
             num_computed_tokens: 0,
             num_preemptions: 0,
@@ -1913,8 +1979,8 @@ impl VllmCore {
             // `waiting`, and applies only to decode ranks with G2, in either
             // scope.
             // Native PRIORITY instead compares the two queue heads by
-            // (priority, arrival); this engine models only FCFS and never
-            // reads request `priority`, so it has no PRIORITY branch.
+            // (priority, arrival). `QueuePolicy::Priority` is validated to
+            // exclude host offload, so it never reaches this branch.
             let prefer_materialized = matches!(
                 admission.stage_for(false),
                 AdmissionStage::PendingDestinationHead
@@ -2417,7 +2483,23 @@ impl VllmCore {
         }
         let running_len = self.state.running.len();
         let mut selected = None;
-        for offset in 0..running_len {
+        if self.args.queue_policy == QueuePolicy::Priority {
+            // vLLM priority scheduling evicts max(running, key=(priority, arrival)).
+            selected = self
+                .state
+                .running
+                .iter()
+                .filter(|uuid| self.state.running_members.contains(uuid))
+                .filter_map(|uuid| {
+                    let request = self.state.requests.get(uuid)?;
+                    (request.status == RequestStatus::Running)
+                        .then_some(((request.priority, request.waiting_order), *uuid))
+                })
+                .max_by_key(|(key, _)| *key)
+                .map(|(_, uuid)| uuid);
+        }
+        let ordered_candidates = if selected.is_none() { running_len } else { 0 };
+        for offset in 0..ordered_candidates {
             let index = match self.args.preemption_mode {
                 PreemptionMode::Fifo => offset,
                 PreemptionMode::Lifo => running_len - offset - 1,
@@ -3339,6 +3421,95 @@ fn scale_decode_time(decode_ms: f64, args: &MockEngineArgs) -> anyhow::Result<Du
     let effective_ratio = args.speedup_ratio * args.decode_speedup_ratio;
     let modeled_ms = modeled_duration_ms(decode_ms, effective_ratio)?;
     Ok(Duration::from_secs_f64(modeled_ms / 1_000.0))
+}
+
+#[cfg(test)]
+mod priority_queue_tests {
+    use super::*;
+
+    fn core(queue_policy: QueuePolicy) -> VllmCore {
+        core_for(queue_policy, WorkerType::Aggregated)
+    }
+
+    fn core_for(queue_policy: QueuePolicy, worker_type: WorkerType) -> VllmCore {
+        VllmCore::new(
+            MockEngineArgs::builder()
+                .block_size(4)
+                .num_gpu_blocks(64)
+                .queue_policy(queue_policy)
+                .worker_type(worker_type)
+                .speedup_ratio(0.0)
+                .build()
+                .unwrap(),
+        )
+    }
+
+    fn submit(core: &mut VllmCore, id: u128, priority: i32) -> Uuid {
+        let uuid = Uuid::from_u128(id);
+        core.receive(DirectRequest {
+            tokens: vec![id as u32; 4],
+            max_output_tokens: 1,
+            uuid: Some(uuid),
+            priority,
+            ..DirectRequest::default()
+        });
+        uuid
+    }
+
+    fn drain(core: &mut VllmCore) -> Vec<Uuid> {
+        let mut order = Vec::new();
+        while let Some(uuid) = core.state.next_waiting_uuid(false, false) {
+            core.state.remove_from_waiting(uuid);
+            order.push(uuid);
+        }
+        order
+    }
+
+    #[test]
+    fn priority_serves_lowest_priority_then_arrival() {
+        let mut core = core(QueuePolicy::Priority);
+        let a = submit(&mut core, 1, 5);
+        let b = submit(&mut core, 2, 1);
+        let c = submit(&mut core, 3, 3);
+        let d = submit(&mut core, 4, 1);
+        assert!(core.state.waiting.is_empty());
+        assert_eq!(drain(&mut core), vec![b, d, c, a]);
+    }
+
+    #[test]
+    fn prefill_worker_serves_lowest_priority_first() {
+        let mut core = core_for(QueuePolicy::Priority, WorkerType::Prefill);
+        let a = submit(&mut core, 1, 5);
+        let b = submit(&mut core, 2, 1);
+        let c = submit(&mut core, 3, 3);
+        assert_eq!(drain(&mut core), vec![b, c, a]);
+    }
+
+    #[test]
+    fn fcfs_ignores_request_priority() {
+        let mut core = core(QueuePolicy::Fcfs);
+        let ids = [(1, 5), (2, 1), (3, 3), (4, 1)].map(|(id, p)| submit(&mut core, id, p));
+        assert_eq!(drain(&mut core), ids.to_vec());
+    }
+
+    #[test]
+    fn priority_requeue_uses_key_instead_of_front() {
+        let mut core = core(QueuePolicy::Priority);
+        let worse = submit(&mut core, 1, 5);
+        let better = submit(&mut core, 2, 3);
+        core.state.remove_from_waiting(worse);
+        core.state.prepend_waiting(worse);
+        assert_eq!(drain(&mut core), vec![better, worse]);
+    }
+
+    #[test]
+    fn completed_priority_waiter_leaves_the_index() {
+        let mut core = core(QueuePolicy::Priority);
+        let first = submit(&mut core, 1, 1);
+        let second = submit(&mut core, 2, 2);
+        assert!(core.state.take_completed(&first).is_some());
+        assert_eq!(drain(&mut core), vec![second]);
+    }
 }
 
 #[cfg(test)]

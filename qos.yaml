@@ -1,11 +1,18 @@
+# Central configuration for run_experiment.py. Paths are relative to the repository root.
+prediction: prediction.yaml
+traffic:
+  # Omit trace_dir to regenerate traces/azure_conv_poisson from AzureLLMInferenceTrace_conv.csv.
+  trace_dir: traces/azure_conv_poisson_x4
+  rates: {min: 1, max: 6, step: 1}
+policies: [fcfs, edf, sjf]
 seed: 42
 classes:
   - name: qos-1
     probability: 0.3
-    slo: {ttft_ms: 100, itl_ms: 50}
+    slo: {ttft_ms: 6000, itl_ms: 50}
   - name: qos-2
     probability: 0.3
-    slo: {ttlt_ms: 1000}
+    slo: {ttlt_ms: 600000}
   - name: qos-3
     probability: 0.4
-    slo: {ttlt_ms: 2000}
+    slo: {ttlt_ms: 1800000}

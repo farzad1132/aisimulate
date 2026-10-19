@@ -192,6 +192,54 @@ def test_prediction_rejects_wrong_backend_scheduler_interval(backend, field, val
         CorePredictionConfig.model_validate({"engine": engine})
 
 
+def test_prediction_accepts_vllm_priority_queue_policy() -> None:
+    engine = _engine()
+    engine["backend"] = "vllm"
+    engine["workers"]["aggregated"] = {"scheduler": {"queue_policy": "priority"}}
+
+    config = CorePredictionConfig.model_validate({"engine": engine})
+
+    assert config.engine.workers.aggregated.scheduler.queue_policy == "priority"
+    default = CorePredictionConfig.model_validate({"engine": _engine()})
+    assert default.engine.workers.aggregated.scheduler.queue_policy == "fcfs"
+
+
+@pytest.mark.parametrize(
+    ("backend", "role"),
+    [("sglang", "aggregated"), ("trtllm", "aggregated"), ("sglang", "prefill"), ("vllm", "decode")],
+)
+def test_prediction_rejects_unsupported_priority_queue_policy(backend: str, role: str) -> None:
+    engine = _engine()
+    engine["backend"] = backend
+    if role != "aggregated":
+        engine["mode"] = "disaggregated"
+        engine["workers"] = {"prefill": {}, "decode": {}}
+    engine["workers"][role] = {"scheduler": {"queue_policy": "priority"}}
+
+    with pytest.raises(ValidationError, match=rf"workers.{role}.scheduler.queue_policy"):
+        CorePredictionConfig.model_validate({"engine": engine})
+
+
+def test_prediction_accepts_vllm_prefill_priority_queue_policy() -> None:
+    engine = _engine()
+    engine["backend"] = "vllm"
+    engine["mode"] = "disaggregated"
+    engine["workers"] = {"prefill": {"scheduler": {"queue_policy": "priority"}}, "decode": {}}
+
+    config = CorePredictionConfig.model_validate({"engine": engine})
+
+    assert config.engine.workers.prefill.scheduler.queue_policy == "priority"
+    assert config.engine.workers.decode.scheduler.queue_policy == "fcfs"
+
+
+def test_prediction_rejects_unknown_queue_policy() -> None:
+    engine = _engine()
+    engine["workers"]["aggregated"] = {"scheduler": {"queue_policy": "edf"}}
+
+    with pytest.raises(ValidationError, match="queue_policy"):
+        CorePredictionConfig.model_validate({"engine": engine})
+
+
 def test_prediction_accepts_trtllm_disaggregated_dp1() -> None:
     config = CorePredictionConfig.model_validate(
         {

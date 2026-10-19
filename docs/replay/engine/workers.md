@@ -46,6 +46,7 @@ engine:
 | `workers.<role>.scheduler.max_sequences` | `256`; `1` for `prefill` | Prefill: `{choices: [1, 2, 4, 8, 16, 32, 64, 128, 256]}`; others: `{choices: [256, 512, 1024]}` | Positive. Maximum running requests on one attention-DP rank. |
 | `workers.<role>.scheduler.prefill_schedule_interval` | `1` | predict only | vLLM only. See [vLLM prefill schedule interval](#vllm-prefill-schedule-interval). |
 | `workers.<role>.scheduler.prefill_decode_interval` | `0` | predict only | SGLang only. See [SGLang prefill/decode interval](#sglang-prefilldecode-interval). |
+| `workers.<role>.scheduler.queue_policy` | `fcfs` | predict only | `fcfs` or `priority`. `priority` is vLLM only, on aggregated or prefill workers without `host_offload`. See [vLLM queue policy](#vllm-queue-policy). |
 | `engine.enable_chunked_prefill` | Backend default (on) | fixed | Boolean. Applies to aggregated and prefill roles; `false` is rejected for SGLang and for AFD. |
 
 A backend-specific scheduler field set to a non-default value on another
@@ -164,6 +165,40 @@ vLLM checks for a drained group every 32 steps and may run extra dummy steps;
 Replay resets immediately, so the phase can differ for requests that arrive in
 that window. Behavior follows vLLM at commit
 [`e2fa285`](https://github.com/vllm-project/vllm/tree/e2fa28594f7baad142a426b0b6a2cfe2c79201c7).
+
+<a id="vllm-queue-policy"></a>
+
+### vLLM queue policy
+
+`queue_policy: fcfs` (the default) admits waiting requests in arrival order. A
+preempted request goes back to the head of the queue, and the victim follows
+the engine's preemption mode (newest running request by default).
+
+`queue_policy: priority` mirrors vLLM's `--scheduling-policy priority`. Each
+request's `priority` comes from the trace row (see
+[Mooncake JSONL](../workloads.md#mooncake-and-mooncake-delta-jsonl)); a lower value is
+served first and ties keep arrival order. A preempted request re-enters the
+queue by that key instead of jumping to the head. Under KV pressure the victim
+is the running request with the largest `(priority, arrival)`. Admission still
+stops at the first waiting request that does not fit, so a blocked
+high-priority request is not overtaken.
+
+```yaml
+engine:
+  backend: vllm
+  workers:
+    aggregated:
+      scheduler: {queue_policy: priority}
+```
+
+Because the key is a plain integer, a caller can express other orders through
+it. For example, writing `arrival_ms + deadline_ms` gives earliest deadline
+first, and writing the prompt length gives shortest prompt first.
+
+In disaggregated mode, set `queue_policy` on the `prefill` role. It orders
+prefill admission and preemption. Decode workers admit KV handoffs in arrival
+order. `priority` is rejected for SGLang, TRT-LLM, decode workers, and workers
+with `host_offload`.
 
 <a id="sglang-prefilldecode-interval"></a>
 

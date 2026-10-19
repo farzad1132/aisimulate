@@ -151,6 +151,24 @@ pub enum PreemptionMode {
     Fifo,
 }
 
+/// vLLM waiting-queue ordering.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuePolicy {
+    /// Serve waiting requests in arrival order.
+    #[default]
+    Fcfs,
+    /// Serve the lowest request `priority` first, ties by arrival, and preempt
+    /// the running request with the largest `(priority, arrival)`.
+    Priority,
+}
+
+impl QueuePolicy {
+    fn is_default(&self) -> bool {
+        *self == Self::Fcfs
+    }
+}
+
 /// SGLang waiting-queue ordering.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -545,6 +563,9 @@ pub struct EngineConfig {
     pub worker_type: WorkerType,
     /// Decode preemption victim order.
     pub preemption_mode: PreemptionMode,
+    /// vLLM waiting-queue order. `priority` also selects preemption victims.
+    #[serde(default, skip_serializing_if = "QueuePolicy::is_default")]
+    pub queue_policy: QueuePolicy,
     /// Retain and expose local token-block hashes in neutral KV events.
     pub emit_kv_events: bool,
     /// Retain block token IDs alongside neutral KV events.
@@ -631,6 +652,8 @@ struct EngineConfigWire {
     worker_type: WorkerType,
     #[serde(default)]
     preemption_mode: PreemptionMode,
+    #[serde(default, skip_serializing_if = "QueuePolicy::is_default")]
+    queue_policy: QueuePolicy,
     #[serde(default)]
     emit_kv_events: bool,
     #[serde(default)]
@@ -700,6 +723,7 @@ impl<'de> Deserialize<'de> for EngineConfig {
             aic_mtp_seed: wire.aic_mtp_seed,
             worker_type: wire.worker_type,
             preemption_mode: wire.preemption_mode,
+            queue_policy: wire.queue_policy,
             emit_kv_events: wire.emit_kv_events,
             emit_kv_token_ids: wire.emit_kv_token_ids,
             kv_transfer_bytes_per_token: wire.kv_transfer_bytes_per_token,
@@ -743,6 +767,7 @@ impl Default for EngineConfig {
             aic_mtp_seed: default_aic_mtp_seed(),
             worker_type: WorkerType::Aggregated,
             preemption_mode: PreemptionMode::Lifo,
+            queue_policy: QueuePolicy::Fcfs,
             emit_kv_events: false,
             emit_kv_token_ids: false,
             kv_transfer_bytes_per_token: None,
@@ -850,6 +875,20 @@ impl EngineConfig {
             self.backend == Backend::Sglang || self.prefill_decode_interval == 0,
             "prefill_decode_interval is supported only for backend=sglang"
         );
+        if self.queue_policy == QueuePolicy::Priority {
+            ensure!(
+                self.backend == Backend::Vllm,
+                "queue_policy=priority is supported only for backend=vllm"
+            );
+            ensure!(
+                matches!(self.worker_type, WorkerType::Aggregated | WorkerType::Prefill),
+                "queue_policy=priority is supported only for aggregated and prefill workers"
+            );
+            ensure!(
+                self.native_host_offload.is_none() && self.g3_offload.is_none(),
+                "queue_policy=priority does not support host offload"
+            );
+        }
         ensure!(
             self.max_model_len.is_none_or(|limit| limit > 0),
             "max_model_len must be positive"
@@ -1730,6 +1769,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn priority_queue_policy_is_limited_to_aggregated_and_prefill_vllm() {
+        let fcfs = serde_json::to_value(EngineConfig::default()).unwrap();
+        assert!(fcfs.get("queue_policy").is_none());
+
+        let config: EngineConfig = serde_json::from_value(serde_json::json!({
+            "queue_policy": "priority"
+        }))
+        .unwrap();
+        assert_eq!(config.queue_policy, QueuePolicy::Priority);
+        config.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["queue_policy"],
+            "priority"
+        );
+
+        let mut prefill = EngineConfig::default();
+        prefill.worker_type = WorkerType::Prefill;
+        prefill.queue_policy = QueuePolicy::Priority;
+        prefill.validate().unwrap();
+
+        for (backend, worker_type, message) in [
+            (Backend::Sglang, WorkerType::Aggregated, "backend=vllm"),
+            (Backend::Trtllm, WorkerType::Aggregated, "backend=vllm"),
+            (Backend::Vllm, WorkerType::Decode, "aggregated and prefill workers"),
+        ] {
+            let mut config = EngineConfig::for_backend(backend);
+            config.worker_type = worker_type;
+            config.queue_policy = QueuePolicy::Priority;
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains(message), "{error}");
+        }
+
+        let mut config = EngineConfig::default();
+        config.queue_policy = QueuePolicy::Priority;
+        config.kv_cache_bytes_per_token = Some(2);
+        config.native_host_offload = Some(NativeHostOffloadConfig::new(8));
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("does not support host offload")
+        );
     }
 
     #[test]

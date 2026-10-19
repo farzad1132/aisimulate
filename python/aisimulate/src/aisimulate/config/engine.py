@@ -118,6 +118,13 @@ class SchedulerPredictionConfig(StrictModel):
             "Rounds may be idle and do not count output tokens; zero disables the interval."
         ),
     )
+    queue_policy: Literal["fcfs", "priority"] = Field(
+        default="fcfs",
+        description=(
+            "vLLM aggregated and prefill workers only: 'priority' serves the lowest request priority first, "
+            "ties by arrival, and preempts the running request with the largest priority."
+        ),
+    )
 
 
 class KvCapacityPredictionConfig(StrictModel):
@@ -929,6 +936,13 @@ def _validate_prediction_scheduler_backend(engine: EnginePredictionConfig) -> No
         ):
             if engine.backend != backend and getattr(worker.scheduler, field) != default:
                 raise ValueError(f"workers.{role}.scheduler.{field} is supported only for backend={backend}")
+        if worker.scheduler.queue_policy != "fcfs":
+            if engine.backend != "vllm" or role not in ("aggregated", "prefill"):
+                raise ValueError(
+                    f"workers.{role}.scheduler.queue_policy is supported only for aggregated and prefill workers with backend=vllm"
+                )
+            if worker.kv_cache.host_offload is not None:
+                raise ValueError(f"workers.{role}.scheduler.queue_policy does not support host_offload")
 
 
 def _validate_prediction_afd(engine: EnginePredictionConfig) -> None:

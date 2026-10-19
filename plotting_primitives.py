@@ -473,12 +473,15 @@ def configure_x_axis_ticks(ax, x_data=None, style: Optional[PlotStyle] = None,
         # Auto-calculate step if not provided
         if x_step is None:
             x_range = final_x_max - final_x_min
-            # Use nice step sizes to get roughly 4-6 ticks
-            magnitude = 10 ** math.floor(math.log10(x_range))
+            # Use nice step sizes to get roughly 4-6 ticks. Base the magnitude on
+            # range/target so ranges like 1-12 can pick a step of 2, not 10.
+            target_ticks = 5
+            if x_range <= 0:
+                x_range = abs(final_x_max) or 1.0
+            magnitude = 10 ** math.floor(math.log10(x_range / target_ticks))
             nice_steps = [1, 2, 5, 10]
             
             # Find the step that gives us closest to 5 ticks
-            target_ticks = 5
             best_step = nice_steps[0] * magnitude
             best_tick_count = abs(x_range / best_step - target_ticks)
             
